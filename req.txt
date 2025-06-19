@@ -1,0 +1,17 @@
+go mod init cache_copy
+go get github.com/cespare/xxhash/v2
+go get github.com/vbauerster/mpb/v8
+go get github.com/shirou/gopsutil/v3/cp
+go get github.com/rivo/tview
+go mod tidy
+go mod vendor
+
+# win
+$env:GOARCH = "amd64"
+$env:GOOS = "windows"
+go build -mod=vendor -o ./bin/cache_copy.exe main.go
+
+# linux
+$env:GOARCH = "amd64"
+$env:GOOS = "linux"
+go build -mod=vendor -o ./bin/cache_copy main.go
