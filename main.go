@@ -1,9 +1,9 @@
 package main
 
 import (
+	"cache_copy/core"
 	"flag"
 	"fmt"
-	"cache_copy/core"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,14 +18,38 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
+// timestamp returns the current time formatted as a string for logging purposes
+// Format: "2006-01-02 15:04:05.000" (YYYY-MM-DD HH:MM:SS.mmm)
 func timestamp() string {
 	return time.Now().Format("2006-01-02 15:04:05.000")
 }
 
+// LoggerFunc defines a function type for logging messages with printf-style formatting
 type LoggerFunc func(format string, args ...interface{})
+
+// ProgressFunc defines a function type for reporting copy progress
+// Parameters: copiedBytes (amount copied so far), totalBytes (total amount to copy)
 type ProgressFunc func(copiedBytes, totalBytes int64)
+
+// FatalFunc defines a function type for reporting fatal errors and terminating execution
 type FatalFunc func(format string, args ...interface{})
 
+// runCopyWorkers orchestrates the file copying process using multiple concurrent workers
+// This is the core function that handles the actual file copying, validation, and caching logic
+// Parameters:
+//   - fileList: slice of relative file paths to copy
+//   - src: source directory path
+//   - rootDst: destination directory path
+//   - cache: global cache instance for tracking file states
+//   - bufSize: buffer size for file I/O operations
+//   - noCache: if true, disables cache usage and copies all files
+//   - validate: if true, validates files by comparing hashes (slower but accurate)
+//   - verbose: verbosity level (0=quiet, 1=large files, 2=all files, 3=debug)
+//   - workers: number of concurrent worker goroutines
+//   - totalBytes: total bytes to copy (for progress tracking)
+//   - logger: function to call for logging messages
+//   - progress: function to call for progress updates
+//   - fatal: function to call for fatal errors
 func runCopyWorkers(
 	fileList []string,
 	src, rootDst string,
@@ -396,7 +420,7 @@ PERFORMANCE TIPS:
 	}
 
 	// PRINT THE ORIGINAL COMMAND AS ENTERED
-	fmt.Fprintf(os.Stderr, "[%s] [INFO] Command: %s\n", timestamp(), originalCommand)
+	fmt.Printf("[%s] [INFO] Command: %s\n", timestamp(), originalCommand)
 
 	// After parsing src and dst:
 	srcClean := filepath.Clean(src)
@@ -422,15 +446,15 @@ PERFORMANCE TIPS:
 
 	// Now use src and dst variables instead of flag.Arg(0), flag.Arg(1)
 	cachePath := core.LocalCacheFile(src, rootDst)
-	fmt.Fprintf(os.Stderr, "[%s] [INFO] Using cache file: %s\n", timestamp(), cachePath)
+	fmt.Printf("[%s] [INFO] Using cache file: %s\n", timestamp(), cachePath)
 
 	// Optionally clear the cache file before starting
 	if *clearCache {
 		if err := os.Remove(cachePath); err == nil {
-			fmt.Fprintf(os.Stderr, "[%s] [INFO] Cache deleted: %s\n", timestamp(), cachePath)
+			fmt.Printf("[%s] [INFO] Cache deleted: %s\n", timestamp(), cachePath)
 		} else if !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "[%s] [ERROR] Failed to delete cache: %v\n", timestamp(), err)
-			return
+			os.Exit(1)
 		}
 	}
 
@@ -456,7 +480,7 @@ PERFORMANCE TIPS:
 
 		if len(staleCacheKeys) > 0 {
 			if *verbose >= 1 {
-				fmt.Fprintf(os.Stderr, "[%s] [INFO] Auto-cleaned %d stale cache entries\n", timestamp(), len(staleCacheKeys))
+				fmt.Printf("[%s] [INFO] Auto-cleaned %d stale cache entries\n", timestamp(), len(staleCacheKeys))
 			}
 			cache.SaveCache()
 		}
@@ -466,14 +490,14 @@ PERFORMANCE TIPS:
 	if *mirror {
 		if err := os.MkdirAll(rootDst, os.ModePerm); err != nil {
 			cache.SaveCache()
-			fmt.Fprintf(os.Stderr, "[%s] [ERROR] Failed to create root destination directory %s: %v\n", timestamp(), rootDst, err)
-			return
+			fmt.Printf("[%s] [ERROR] Failed to create root destination directory %s: %v\n", timestamp(), rootDst, err)
+			os.Exit(1)
 		}
 		err := deleteExtraFiles(src, rootDst, cache)
 		if err != nil {
 			cache.SaveCache()
-			fmt.Fprintf(os.Stderr, "[%s] [ERROR] Error deleting extra files: %v\n", timestamp(), err)
-			return
+			fmt.Printf("[%s] [ERROR] Error deleting extra files: %v\n", timestamp(), err)
+			os.Exit(1)
 		}
 		cache.SaveCache()
 	}
@@ -503,7 +527,7 @@ PERFORMANCE TIPS:
 	}
 	cache.Unlock()
 	if allOld && len(cache.Keys()) > 0 {
-		fmt.Fprintf(os.Stderr, "[%s] [INFO] All cache entries older than %d days, deleting cache file: %s\n", timestamp(), *maxCacheAge, cachePath)
+		fmt.Printf("[%s] [INFO] All cache entries older than %d days, deleting cache file: %s\n", timestamp(), *maxCacheAge, cachePath)
 		os.Remove(cachePath)
 	}
 
@@ -523,9 +547,9 @@ PERFORMANCE TIPS:
 		return nil
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] [ERROR] Error gathering file list: %v\n", timestamp(), err)
+		fmt.Printf("[%s] [ERROR] Error gathering file list: %v\n", timestamp(), err)
 		cache.SaveCache()
-		return
+		os.Exit(1)
 	}
 
 	// Calculate total bytes to copy for progress bar
@@ -542,7 +566,9 @@ PERFORMANCE TIPS:
 	for _, relDir := range dirs {
 		dstDir := filepath.Join(rootDst, relDir)
 		if err := os.MkdirAll(dstDir, os.ModePerm); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] [ERROR] Failed to create directory %s: %v\n", timestamp(), dstDir, err)
+			fmt.Printf("[%s] [ERROR] Failed to create directory %s: %v\n", timestamp(), dstDir, err)
+			cache.SaveCache()
+			os.Exit(1)
 		}
 	}
 
@@ -553,6 +579,8 @@ PERFORMANCE TIPS:
 			logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 			if err != nil {
 				fmt.Fprintf(out, "[%s] [ERROR] Failed to open log file %s: %v\n", timestamp(), *logPath, err)
+				cache.SaveCache()
+				os.Exit(1)
 			} else {
 				out = io.MultiWriter(out, logFile)
 			}
@@ -562,7 +590,7 @@ PERFORMANCE TIPS:
 		if err != nil {
 			fmt.Fprintf(out, "[%s] [ERROR] Invalid buffer size: %v\n", timestamp(), err)
 			cache.SaveCache()
-			return
+			os.Exit(1)
 		}
 
 		totalBuffer := int64(*workers) * int64(bufSize)
@@ -674,7 +702,7 @@ PERFORMANCE TIPS:
 		fmt.Fprintf(logView, "[%s] [ERROR] Invalid buffer size: %v\n", timestamp(), err)
 		cache.SaveCache()
 		app.Stop()
-		return
+		os.Exit(1)
 	}
 
 	totalBuffer := int64(*workers) * int64(bufSize)
@@ -689,6 +717,9 @@ PERFORMANCE TIPS:
 		logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			fmt.Fprintf(logView, "[%s] [ERROR] Failed to open log file %s: %v\n", timestamp(), *logPath, err)
+			cache.SaveCache()
+			app.Stop()
+			os.Exit(1)
 		} else {
 			out = io.MultiWriter(logView, logFile)
 		}
@@ -777,8 +808,15 @@ PERFORMANCE TIPS:
 	}
 }
 
-// deleteExtraFiles removes files and directories from the destination that do not exist in the source.
-// It also removes corresponding entries from the cache.
+// deleteExtraFiles removes files and directories from the destination that do not exist in the source
+// This function is used when the --mirror flag is enabled to ensure the destination exactly matches the source
+// It also removes corresponding entries from the cache to keep it synchronized
+// Parameters:
+//   - srcDir: source directory path to compare against
+//   - dstDir: destination directory path to clean up
+//   - cache: global cache instance to update when files are deleted
+//
+// Returns: error if any deletion operation fails
 func deleteExtraFiles(srcDir, dstDir string, cache *core.GlobalCache) error {
 	var deletedDirs = make(map[string]bool)
 	err := filepath.Walk(dstDir, func(dstPath string, info os.FileInfo, err error) error {
