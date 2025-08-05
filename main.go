@@ -91,8 +91,14 @@ func runCopyWorkers(
 				shouldCopy := true
 				var hash uint64
 
-				// Check cache to determine if file needs to be copied
-				if !noCache && !validate {
+				// If no-cache is enabled, always copy all files regardless of other flags
+				if noCache {
+					if verbose >= 3 {
+						logger("[%s] [NO-CACHE] Forcing copy (cache disabled): %s\n", timestamp(), relPath)
+					}
+					// shouldCopy remains true, skip all checking logic
+				} else if !validate {
+					// Normal cache checking logic (only when validate is false)
 					cache.RLock()
 					entry, ok := cache.IsUpToDate(relPath)
 					cache.RUnlock()
