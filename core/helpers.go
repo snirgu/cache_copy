@@ -3,15 +3,14 @@ package core
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // OpenWithRetry wraps os.Open with retry logic.
@@ -56,27 +55,29 @@ func CreateWithRetry(path string, maxRetries int) (*os.File, error) {
 	return f, err
 }
 
-// ParseSize parses a string like "4MB", "256KB", or "1048576" into bytes.
+// ParseSize parses a size like "4MB", "256KB", "1GB", "512k" or "1048576"
+// (bytes) into bytes. Units are binary (1KB = 1024 bytes) and case-insensitive;
+// the number must be a positive whole number.
 func ParseSize(s string) (int, error) {
-	var size int
-	var unit string
-	n, err := fmt.Sscanf(s, "%d%s", &size, &unit)
-	if n == 1 && err == nil {
-		return size, nil // No unit, just bytes
-	}
-	if n == 2 && err == nil {
-		switch strings.ToUpper(unit) {
-		case "KB":
-			return size * 1024, nil
-		case "MB":
-			return size * 1024 * 1024, nil
-		case "B":
-			return size, nil
-		default:
-			return 0, fmt.Errorf("unknown size unit: %s", unit)
+	t := strings.ToUpper(strings.TrimSpace(s))
+	mult := 1
+	for _, u := range []struct {
+		suffix string
+		mult   int
+	}{{"GB", 1 << 30}, {"G", 1 << 30}, {"MB", 1 << 20}, {"M", 1 << 20}, {"KB", 1 << 10}, {"K", 1 << 10}, {"B", 1}} {
+		if strings.HasSuffix(t, u.suffix) {
+			t, mult = strings.TrimSpace(strings.TrimSuffix(t, u.suffix)), u.mult
+			break
 		}
 	}
-	return 0, fmt.Errorf("invalid size format: %s", s)
+	n, err := strconv.Atoi(t)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid size %q: use a positive whole number with an optional KB, MB or GB unit", s)
+	}
+	if n > math.MaxInt/mult {
+		return 0, fmt.Errorf("size %q is too large", s)
+	}
+	return n * mult, nil
 }
 
 // HumanSize converts a size in bytes to a human-readable string.
@@ -104,12 +105,6 @@ func RenderProgressBar(current, total int64, width int) string {
 	return fmt.Sprintf("[%s] %3.0f%%", bar, percent*100)
 }
 
-// Exists checks if a given file or directory path exists on disk.
-func Exists(path string) bool {
-	_, err := os.Stat(path)
-	return !os.IsNotExist(err)
-}
-
 // FileHash computes and returns the xxHash of a file.
 func FileHash(path string) (uint64, error) {
 	f, err := os.Open(path)
@@ -125,49 +120,31 @@ func FileHash(path string) (uint64, error) {
 	return h.Sum64(), nil
 }
 
-// PrintCPUMonitor prints CPU and memory usage to stdout.
-func PrintCPUMonitor() {
+// CopyAndHash copies src to dst through buf and returns the number of bytes
+// written and the xxHash64 of exactly those bytes, so a copied file never
+// needs a second read just to be hashed. Short writes are reported as errors.
+func CopyAndHash(dst io.Writer, src io.Reader, buf []byte) (int64, uint64, error) {
+	h := xxhash.New()
+	var written int64
 	for {
-		percent, _ := cpu.Percent(0, false)
-		numGoroutine := runtime.NumGoroutine()
-		vmem, _ := mem.VirtualMemory()
-		fmt.Fprintf(os.Stdout, "[MONITOR] CPU: %.2f%% | Mem: %.2f%% (%.2f GB/%.2f GB) | Goroutines: %d\n",
-			percent[0],
-			vmem.UsedPercent,
-			float64(vmem.Used)/(1024*1024*1024),
-			float64(vmem.Total)/(1024*1024*1024),
-			numGoroutine)
-		time.Sleep(1 * time.Second)
-	}
-}
-
-// GetRetryCount returns the appropriate retry count based on whether the paths are CIFS/SMB
-func GetRetryCount(srcPath, dstPath string) int {
-	if IsCIFSPath(srcPath) || IsCIFSPath(dstPath) {
-		return 5 // More retries for CIFS/SMB paths
-	}
-	return 3 // Standard retry count for local filesystems
-}
-
-// IsCIFSPath detects if a path is likely a CIFS/SMB network path
-func IsCIFSPath(path string) bool {
-	if runtime.GOOS == "windows" {
-		// Windows: UNC paths (\\server\share) or network drives (F: and above)
-		if strings.HasPrefix(path, `\\`) {
-			return true
-		}
-		if len(path) >= 2 && path[1] == ':' {
-			drive := strings.ToUpper(string(path[0]))
-			// Consider drives F: and above as potentially network drives
-			if drive >= "F" {
-				return true
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			if werr != nil {
+				return written, 0, werr
 			}
+			if nw != nr {
+				return written, 0, io.ErrShortWrite
+			}
+			h.Write(buf[:nr])
+			written += int64(nw)
 		}
-	} else {
-		// Linux/Unix: common CIFS mount points
-		if strings.HasPrefix(path, "/mnt/") || strings.HasPrefix(path, "/media/") {
-			return true
+		if rerr == io.EOF {
+			return written, h.Sum64(), nil
+		}
+		if rerr != nil {
+			return written, 0, rerr
 		}
 	}
-	return false
 }
+
