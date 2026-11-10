@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"cache_copy/core"
 	"fmt"
 	"io"
@@ -23,24 +24,50 @@ import (
 // set. main sets it up first thing, so the log file captures the whole run.
 // logFile is that file alone (nil without --log-path), for the TUI, which
 // draws its own screen instead of writing to the console.
+//
+// startupLog also records the lines logged before the copy starts (command,
+// cache file, mirror deletions, ...). The TUI takes over the screen and would
+// hide them, so it shows them at the top of its log view.
 var (
-	logOut  io.Writer = os.Stdout
-	logFile io.Writer
+	logOut     io.Writer = os.Stdout
+	logFile    io.Writer
+	startupLog bytes.Buffer
 )
 
 // setupLog opens the --log-path file for appending and routes every later
-// log line to both the console and the file.
+// log line to the console, the file, and (until the copy starts) startupLog.
 func setupLog(path string) error {
-	if path == "" {
-		return nil
+	if path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return err
+		}
+		logFile = f
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
-	logFile = f
-	logOut = io.MultiWriter(os.Stdout, f)
+	logOut = io.MultiWriter(consoleAndFile(), &startupLog)
 	return nil
+}
+
+// consoleAndFile is the console plus the --log-path file, if any.
+func consoleAndFile() io.Writer {
+	if logFile != nil {
+		return io.MultiWriter(os.Stdout, logFile)
+	}
+	return os.Stdout
+}
+
+// tuiScreen is the screen the TUI draws on: nil means the real terminal.
+// Tests set a simulated screen.
+var tuiScreen tcell.Screen
+
+// takeStartupLog stops recording startup lines and returns those recorded.
+// Both front ends call it before copying, so the recording never grows with
+// the per-file log of a long run.
+func takeStartupLog() string {
+	logOut = consoleAndFile()
+	lines := startupLog.String()
+	startupLog.Reset()
+	return lines
 }
 
 // isInteractive reports whether stdin and stdout are both a terminal, which
@@ -72,6 +99,7 @@ func validateBufferAllocation(config *Config) {
 // live progress bar; when output goes to a file, pipe or CI log it writes a
 // [PROGRESS] line every 30 seconds instead, so logs stay clean.
 func runNoTUIMode(cache *core.GlobalCache, config *Config, fileList []string, totalBytes int64) []string {
+	takeStartupLog() // already on the console; stop recording
 	validateBufferAllocation(config)
 
 	fmt.Fprintf(logOut, "[%s] [INFO] Using %d worker(s)\n", timestamp(), config.Workers)
@@ -177,16 +205,20 @@ func writeSummary(out io.Writer, config *Config, failures []string) {
 // finishes, that is reported as a failure too.
 func runTUIMode(cache *core.GlobalCache, config *Config, fileList []string, totalBytes int64) []string {
 	app := tview.NewApplication()
+	if tuiScreen != nil {
+		app.SetScreen(tuiScreen)
+	}
+	// Color tags stay off: with them on, tview reads "[INFO]", "[WARN]" and
+	// "[ERROR]" as tags and drops them, so log levels never showed.
 	logView := tview.NewTextView().
-		SetDynamicColors(true).
 		SetScrollable(true).
 		SetWrap(true).
 		SetChangedFunc(func() {
 			app.Draw()
 		})
 
-	progressView := tview.NewTextView().SetDynamicColors(true)
-	monitorView := tview.NewTextView().SetDynamicColors(true)
+	progressView := tview.NewTextView()
+	monitorView := tview.NewTextView()
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(monitorView, 1, 0, false).
@@ -216,6 +248,11 @@ func runTUIMode(cache *core.GlobalCache, config *Config, fileList []string, tota
 
 	validateBufferAllocation(config)
 
+	// Show what was logged before the TUI took over the screen (command,
+	// cache file, ...), the same lines --no-tui prints. They are already in the
+	// --log-path file, so they go to the log view only.
+	fmt.Fprint(logView, takeStartupLog())
+
 	// The TUI owns the screen, so its log lines go to the log view and the
 	// --log-path file, not to the console.
 	var out io.Writer = logView
@@ -225,7 +262,6 @@ func runTUIMode(cache *core.GlobalCache, config *Config, fileList []string, tota
 
 	fmt.Fprintf(out, "[%s] [INFO] Using %d worker(s)\n", timestamp(), config.Workers)
 	fmt.Fprintf(out, "[%s] [INFO] Using buffer size: %s (%d bytes)\n", timestamp(), core.HumanSize(config.BufferSize), config.BufferSize)
-	fmt.Fprintf(out, "[%s] [INFO] Command: %s\n", timestamp(), config.OriginalCmd)
 
 	if config.Validate {
 		fmt.Fprintf(out, "[%s] [VALIDATE] Validation mode enabled - all files will be verified\n", timestamp())
