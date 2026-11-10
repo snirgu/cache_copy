@@ -3,6 +3,7 @@
 #
 # Binaries for programs and plugins
 bin/*
+!bin/.gitkeep
 *.exe~
 *.dll
 *.so
@@ -33,3 +34,6 @@ go.work.sum
 
 .cache_cache_copy
 *.log
+
+# Release files (attached to GitHub Releases, not committed)
+dist/

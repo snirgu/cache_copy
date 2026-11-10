@@ -4,6 +4,7 @@ package main
 
 import (
 	"cache_copy/core"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,9 @@ func handleMirrorMode(cache *core.GlobalCache, config *Config) {
 	}
 
 	deleted, err := deleteExtraFiles(config.Src, config.RootDst, cache, config.DryRun)
+	if errors.Is(err, errInterrupted) {
+		exitIfInterrupted(cache)
+	}
 	if err != nil {
 		fatalf(cache, "Error deleting extra files: %v", err)
 	}
@@ -35,6 +39,9 @@ func deleteExtraFiles(srcDir, dstDir string, cache *core.GlobalCache, dryRun boo
 	}
 	deleted := 0
 	err := filepath.Walk(dstDir, func(dstPath string, info os.FileInfo, err error) error {
+		if interrupted.Load() {
+			return errInterrupted
+		}
 		if err != nil {
 			return err
 		}

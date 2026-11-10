@@ -129,7 +129,7 @@ func runCopyWorkers(
 			defer wg.Done()
 			buf := make([]byte, opts.BufSize)
 			for relPath := range fileChan {
-				if r.failures.stopped() {
+				if r.failures.stopped() || interrupted.Load() {
 					notStarted.Add(1)
 					continue
 				}
@@ -143,6 +143,10 @@ func runCopyWorkers(
 	close(fileChan)
 	wg.Wait()
 
+	if interrupted.Load() {
+		logger("[%s] [ERROR] Interrupted: %d file(s) were not processed\n", timestamp(), notStarted.Load())
+		return r.failures.items
+	}
 	if r.failures.stopped() {
 		logger("[%s] [ERROR] Stopped after first failure: %d file(s) were not processed\n", timestamp(), notStarted.Load())
 		return r.failures.items

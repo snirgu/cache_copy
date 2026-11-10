@@ -64,6 +64,9 @@ func performFileCopy(relPath, srcPath, dstPath string, cache *core.GlobalCache,
 	var lastErr error
 
 	for attempt := 1; attempt <= retryCount; attempt++ {
+		if interrupted.Load() {
+			return errInterrupted
+		}
 		if attempt > 1 {
 			// Always shown: a retry means something abnormal happened on this file.
 			logger("[%s] [WARN] Copy attempt %d/%d for %s failed: %v - discarding partial file and recopying from scratch\n",
@@ -85,6 +88,9 @@ func performFileCopy(relPath, srcPath, dstPath string, cache *core.GlobalCache,
 		}
 		if err != nil {
 			removeTemp(tmpPath)
+			if errors.Is(err, errInterrupted) {
+				return err // the user asked to stop: no retry
+			}
 			lastErr = err
 			continue
 		}
@@ -172,7 +178,7 @@ func copyAttempt(srcPath, tmpPath string, buf []byte, openTries int, fsync, veri
 		return nil, 0, err
 	}
 
-	n, hash, err := core.CopyAndHash(out, in, buf)
+	n, hash, err := core.CopyAndHash(out, interruptibleReader{in}, buf)
 	if err != nil {
 		out.Close()
 		return nil, 0, err

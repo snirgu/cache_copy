@@ -48,6 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Fprintf(logOut, "[%s] [INFO] Command: %s\n", timestamp(), config.OriginalCmd)
+	handleInterrupts()
 	if err := checkPaths(config); err != nil {
 		fatalf(nil, "%v", err)
 	}
@@ -68,6 +69,7 @@ func main() {
 
 	// Handle mirror mode
 	handleMirrorMode(cache, config)
+	exitIfInterrupted(cache)
 
 	// Clean old cache entries
 	cleanOldCacheEntries(cache, config)
@@ -77,6 +79,7 @@ func main() {
 	if err != nil {
 		fatalf(cache, "Error gathering file list: %v", err)
 	}
+	exitIfInterrupted(cache)
 
 	// Clean stale cache entries
 	cleanStaleCache(cache, config, fileList)
@@ -97,6 +100,7 @@ func main() {
 		failures = runTUIMode(cache, config, fileList, totalBytes)
 	}
 
+	exitIfInterrupted(cache)
 	saveCache(cache)
 	if len(failures) > 0 {
 		os.Exit(1)

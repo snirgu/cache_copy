@@ -1,126 +1,158 @@
-## cache_copy:
-Cli tool for fast copy and caching for win and linux.
+# cache_copy
 
+Fast, cached, **faithful** file copying for Windows and Linux.
 
-## help:
-Usage: cache_copy [src] [dst] [options]
+`cache_copy` copies a folder tree and remembers what it copied, so the next run only copies what changed. A destination file is either an exact copy of its source or is reported as a failure. A damaged or partial file never sits under the real name looking like a good copy.
 
-[src] and [dst] are required.
+- [What it guarantees](#what-it-guarantees)
+- [Install](#install)
+- [Usage](#usage)
+- [Options](#options)
+- [How it decides what to copy](#how-it-decides-what-to-copy)
+- [What is copied, and what is not](#what-is-copied-and-what-is-not)
+- [Exit codes](#exit-codes)
+- [Interrupting a run (Ctrl+C)](#interrupting-a-run-ctrlc)
+- [The cache](#the-cache)
+- [Building and releasing](#building-and-releasing)
 
-SRC PATH BEHAVIOR:
-  - If [src] ends with a path separator (\ on Windows, / on Linux), the CONTENTS of the source directory are copied into [dst].
-	Example: cache_copy myfolder\ dest\      (copies all files/folders inside myfolder\ into dest\)
-  - If [src] does NOT end with a separator, the source directory itself is copied as a subdirectory of [dst].
-	Example: cache_copy myfolder dest\       (creates dest\myfolder\ and copies everything inside myfolder into it)
+## What it guarantees
 
-This behavior applies the same way when using --mirror:
-  - With --mirror, extra files/directories in the destination (as determined by the src path logic above) will be deleted to match the source.
+- **Atomic copies.** Each file is written to `<name>.cache_copy.tmp` and renamed into place only when every read, write, flush and close succeeded, the byte count matches, and the source did not change during the copy. An interrupted or failed copy never leaves a partial file under the real name.
+- **Problems are never silent.** A failed attempt is discarded and the file is copied again from scratch with a new file handle; a failed handle is never reused, since that can produce a file with the right size but wrong content. A file that needed a retry is read back and compared with the source before it is accepted. Every retry is logged as `[WARN]`.
+- **Verification reads the real storage.** Read-backs bypass this machine's file cache (`FILE_FLAG_NO_BUFFERING` on Windows, `O_DIRECT` on Linux), so they check what the disk or network server actually holds. Where a filesystem cannot do that, a warning says so.
+- **The first failure stops the run** with exit code 1 and a list of the files that were not copied faithfully. A file that still fails after all retries keeps its previous complete version and is copied again on the next run.
+- **Safe paths.** A destination inside the source is refused. With `--mirror`, a source inside the destination and a drive or filesystem root (such as `D:\`) are refused too.
 
-VERBOSITY LEVELS:
-  -verbose 0: Quiet mode (default) - only shows progress and errors
-  -verbose 1: Shows large file operations (>1GB)
-  -verbose 2: Shows all file operations (copying/skipping)
-  -verbose 3: Shows detailed cache debugging information (sizes, hashes, destination checks)
+## Install
 
-FLAGS:
-  -workers int
-		Number of concurrent workers for file copying (default: number of CPU cores)
-  
-  -clear-cache
-		Delete the cache file before starting copy (forces fresh copy of all files)
-  
-  -mirror
-		Mirror source to destination: delete extra files in the destination that are not in the source
-  
-  -no-cache
-		Disable cache: always copy all files (ignores existing cache, slower but always accurate)
-  
-  -max-cache-age int
-		Maximum age (in days) for cache entries. Entries older than this are removed (default: 90)
-  
-  -verbose int
-		Set verbosity level: 0=quiet, 1=large files >1GB, 2=all files, 3=cache debug (default: 0)
-  
-  -log-path string
-		Path to log file: every log line of the run is also appended here
-  
-  -buffer-size string
-		Buffer size for file copy operations (default: "4MB")
-		Examples: 4MB, 256KB, 1GB, 1048576 (units are binary: 1KB = 1024 bytes)
-  
-  -no-tui
-		Disable TUI and use classic terminal output (disables fancy progress display).
-		The TUI is also skipped automatically when not run in an interactive terminal
-		(scripts, pipes, redirected output); a [PROGRESS] line is then logged every 30s
-  
-  -validate
-		Validate files by comparing size and hash between source and destination
-		(slower but 100%% accurate - ignores cache and checks actual file content)
-  
-  -auto-clean
-		Automatically clean stale cache entries on every run (default: true)
-		Use --auto-clean=false to disable automatic cache cleaning
+Download the binary for your system from the [Releases page](https://github.com/snirgu/cache_copy/releases):
 
-  -retry
-		Retry a failed file copy from scratch, then verify the result (default: true)
-		Use --retry=false (or --retry false) to give every file exactly one attempt;
-		the first error then fails the file and stops the run
+| System | File |
+|---|---|
+| Windows (64-bit) | `cache_copy-<version>-windows-amd64.exe` |
+| Linux (64-bit) | `cache_copy-<version>-linux-amd64` (run `chmod +x` on it) |
 
-  -cache-dir string
-		Folder for cache files (default: %LocalAppData%\cache_copy on Windows,
-		~/.cache/cache_copy on Linux)
+Rename it to `cache_copy` / `cache_copy.exe` if you like. It is a single file with no dependencies. To build it yourself, see [Building and releasing](#building-and-releasing).
 
-  -fsync
-		Flush every copied file to disk before it is renamed into place (default: true).
-		Use --fsync=false for speed with many small files; write errors then show up
-		only when the file is closed, and a power cut may lose recently copied files
+## Usage
 
-  -dry-run
-		Show what would be copied and (with --mirror) deleted, without changing
-		anything: no files, directories or cache are written
+```
+cache_copy [src] [dst] [options]
+```
 
-Options may come before, between or after [src] and [dst]. Use -- to end the
-options, e.g. for a path that starts with "-".
+Options may come before, between or after the paths. Use `--` to end the options, for example for a path that starts with `-`. On/off options accept `--retry=false` or `--retry false`.
 
-COPY BEHAVIOR:
-  - Files are written to <name>.cache_copy.tmp and renamed into place only when
-	complete, so an interrupted copy never leaves a partial file under the real name
-  - Modification time and permissions are copied from the source
-  - Symbolic links are recreated as links (never followed); devices, sockets, pipes
-	and Windows junctions are reported as errors
-  - The destination may not be inside the source; with --mirror the source may not be
-	inside the destination, and a drive/filesystem root is refused
+**Whether `[src]` ends with a separator matters:**
 
-EXAMPLES:
-  cache_copy /source/folder /destination/folder
-  cache_copy /source/folder/ /destination/folder --mirror
-  cache_copy /source /dest --workers 8 --buffer-size 8MB --verbose 2
-  cache_copy /source /dest --validate --no-cache --verbose 3
-  cache_copy /source /dest --clear-cache --mirror --log-path copy.log
-  cache_copy /source /dest --auto-clean=false --verbose 1
+| Command | Result |
+|---|---|
+| `cache_copy myfolder dest` | creates `dest\myfolder\` and copies everything into it |
+| `cache_copy myfolder\ dest` | copies the **contents** of `myfolder` directly into `dest\` |
 
-CACHE BEHAVIOR:
-  - Cache files are stored in the user cache folder (%LocalAppData%\cache_copy on Windows,
-	~/.cache/cache_copy on Linux), or in --cache-dir; a cache from version 1.0.3 or older
-	(.cache_cache_copy in the current folder) is moved there automatically
-  - Each source/destination pair gets its own cache file, named <source>_to_<destination>_<hash>.json.
-	Different spellings of the same folders (letter case, Windows short names like
-	AERONA~1, symbolic links) share one cache
-  - Cache entries track file size, hash, and source/destination modification times
-  - A file is skipped only if, in this order (cheapest first), its size and modification
-	time match the cache, the destination is unchanged, and its content hash matches;
-	the first difference makes it copy. Unchanged files are still read once to hash them
-  - Use --clear-cache to start fresh and delete the entire cache file
-  - Use --validate to bypass cache and verify actual file content
-  - Stale cache entries are automatically cleaned by default (disable with --auto-clean=false)
+On Windows both `\` and `/` count as a trailing separator; on Linux, `/`. With `--mirror`, the same rule decides which destination folder is mirrored.
 
-PERFORMANCE TIPS:
-  - Increase --workers for many small files (default is usually good)
-  - Increase --buffer-size for large files (4MB-8MB recommended)
-  - Use --no-tui for scripting or when TUI causes issues
-  - Use --validate only when you need 100%% verification (slower)
+**Examples:**
 
+```
+cache_copy D:\data E:\backup                          copy D:\data into E:\backup\data
+cache_copy D:\data\ E:\backup --mirror                make E:\backup an exact mirror of D:\data
+cache_copy D:\data\ E:\backup --mirror --dry-run      show what the mirror would delete and copy
+cache_copy /src /dst --validate                       copy, then re-read every copied file to verify it
+cache_copy /src /dst --log-path copy.log --no-tui     plain output, also saved to copy.log
+```
 
+## Options
 
-## build instructions:
-run build.bat script, binaries results are inside 'bin' folder
+| Option | Default | Description |
+|---|---|---|
+| `--workers N` | CPU cores | Number of files copied in parallel. |
+| `--buffer-size SIZE` | `4MB` | Copy buffer per worker. Accepts `256KB`, `8MB`, `1GB`, `512k`, or bytes. Units are binary (1KB = 1024 bytes). |
+| `--mirror` | off | Delete files and folders in the destination that are not in the source. Use `--dry-run` first. |
+| `--dry-run` | off | Show what would be copied and (with `--mirror`) deleted, without changing anything: no files, folders or cache are written. |
+| `--validate` | off | Compare source and destination content for every file, and re-read every copied file afterwards. Slow but complete; a mismatching destination file is deleted. |
+| `--retry` | on | Retry a failed copy from scratch, then verify it. `--retry=false` gives every file exactly one attempt. |
+| `--fsync` | on | Flush every file to disk before it is renamed into place. `--fsync=false` is faster for many small files, but write errors then appear only when the file is closed, and a power cut may lose recently copied files. |
+| `--no-cache` | off | Ignore the cache and copy every file. |
+| `--clear-cache` | off | Delete this job's cache first, so every file is checked and copied again. |
+| `--cache-dir DIR` | user cache folder | Where cache files are kept (see [The cache](#the-cache)). |
+| `--max-cache-age DAYS` | `90` | Drop cache entries for files not seen for this many days. |
+| `--auto-clean` | on | Drop cache entries for files no longer in the source. |
+| `--no-tui` | off | Plain output instead of the full-screen display. The TUI is also skipped automatically when the output is not an interactive terminal (scripts, pipes, redirected output); a `[PROGRESS]` line is then logged every 30 seconds. |
+| `--log-path FILE` | none | Also append every log line of the run to this file. |
+| `--verbose N` | `0` | `0` progress and errors only; `1` also files over 1 GB; `2` every file copied or skipped; `3` also why each file was copied or skipped. |
+
+## How it decides what to copy
+
+The checks run from cheapest to most expensive, and the first difference means the file is copied:
+
+| # | Check | Cost |
+|---|---|---|
+| 1 | Is the file in the cache? | memory |
+| 2 | Source size, then modification time, against the cache | memory (both come from one metadata read) |
+| 3 | Destination size and modification time against what was recorded after the copy | one metadata read of the destination |
+| 4 | **Source content hash** (xxHash64) against the cache | reads the whole source file |
+
+A file is skipped only if all four match. A file that changed but kept the same size and date is still caught by its hash, and a destination file that was edited after it was copied is caught by step 3. This means every unchanged file is still read once per run to hash it; that is the price of the guarantee.
+
+A destination file that was edited so it keeps exactly the same size *and* its modification time was set back is detected only by `--validate`, which reads the destination itself.
+
+## What is copied, and what is not
+
+**Copied:**
+- file contents, verified as described above;
+- each file's modification time;
+- permissions: the read-only flag on Windows, and the mode bits (including execute) on Linux;
+- symbolic links, recreated as links with the same target. Links are never followed, and links whose target does not exist are kept as they are. Creating links on Windows needs Developer Mode or an administrator prompt;
+- empty folders.
+
+**Not copied:**
+- **folder modification times**: folders get the time they were created at the destination;
+- **file owner and group on Linux** (that would need root), **Windows ACLs** (security permissions), **alternate data streams** and other extended attributes;
+- **Windows junctions, named pipes, sockets and devices**: these are reported as errors and stop the run (exit code 1). They are never followed or read, so they can neither hang the copy nor be copied wrongly.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Every file is a faithful copy of the source (with `--dry-run`: the report completed). |
+| `1` | A file could not be copied faithfully, or the run could not start (bad path, unreadable source, ...). The log lists what failed. |
+| `2` | Unknown or malformed option. |
+| `130` | Interrupted by Ctrl+C. Files already copied are complete; run again to finish. |
+
+## Interrupting a run (Ctrl+C)
+
+The first Ctrl+C stops the run safely:
+- no new files are started;
+- files being copied stop at their next chunk, and their temp files are deleted;
+- the cache is saved;
+- the run exits with code 130.
+
+Files already copied are complete and verified, so running the same command again finishes the job. A second Ctrl+C quits immediately; any leftover `*.cache_copy.tmp` files are replaced by the next run (and deleted by `--mirror`). In the TUI, quitting before the copy finishes stops it the same way.
+
+## The cache
+
+- Each source/destination pair has its own cache file, named `<source>_to_<destination>_<hash>.json`.
+- Cache files are kept in `%LocalAppData%\cache_copy` on Windows and `~/.cache/cache_copy` on Linux, or in `--cache-dir`. The folder you run the command from does not matter.
+- Different spellings of the same folders (letter case on Windows, short names like `AERONA~1`, symbolic links) share one cache.
+- A cache created by version 1.0.3 or older (in `.cache_cache_copy` under the current folder) is moved to the new location automatically, so upgrading does not cause a full re-copy.
+- Each entry records the size, the content hash, and the source and destination modification times.
+- While copying, the cache is saved every 5 seconds and at the end, always by writing a new file and renaming it, so a crash cannot corrupt it. If the cache is lost, the next run re-checks files by hash; nothing is copied wrongly.
+
+## Building and releasing
+
+Requires Go 1.24 or newer and GNU Make 4.2 or newer (`winget install ezwinports.make` on Windows). Dependencies are vendored, so a build needs no network access. The `VERSION` file holds the version and is compiled into the binaries.
+
+| Command | What it does |
+|---|---|
+| `make build` | Build `bin/cache_copy.exe` and `bin/cache_copy` |
+| `make check` | `go vet` and all tests |
+| `make dist` | Build the versioned release files into `dist/` |
+| `make release V=x.y.z` | Check and build, then commit `VERSION` and tag `vx.y.z` (needs a clean working tree) |
+| `make publish` | Push the branch and tag, then create the GitHub Release with both binaries attached |
+| `make clean` | Remove build output |
+
+`make publish` needs the GitHub CLI, logged in once: `winget install GitHub.cli`, then `gh auth login`. It refuses to run unless the current commit is exactly the release tag, so the uploaded binaries are built from exactly the tagged code. Binaries are not committed to git; they are attached to the GitHub Release.
+
+`build.bat` builds both binaries without `make`, as a fallback.
+
+Run `make help` to see every target.

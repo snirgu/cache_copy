@@ -334,8 +334,12 @@ func runTUIMode(cache *core.GlobalCache, config *Config, fileList []string, tota
 
 	// Run returns before the copy finished only if the user quit (e.g. Ctrl+C).
 	// Files still in flight are left as temp files, never under their real name.
+	// Run returning early means the user quit (Ctrl+C is a key press in the
+	// TUI). Stop the workers the same way as an interrupt in plain mode and
+	// wait for them, so no copy is cut off mid-write; main then exits 130.
 	if !finished.Load() {
-		fmt.Fprintf(logOut, "[%s] [ERROR] Copy interrupted before it finished - destination is incomplete\n", timestamp())
+		interrupted.Store(true)
+		<-done
 		return []string{"copy interrupted by user"}
 	}
 	// The summary is already in the log file; repeat it on the console, which

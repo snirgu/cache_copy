@@ -20,6 +20,9 @@ func runPostCopyValidation(copiedFiles []string, src, rootDst string, cache *cor
 
 	var validationErrors int
 	for i, relPath := range copiedFiles {
+		if interrupted.Load() {
+			break
+		}
 		if i%10 == 0 || i == len(copiedFiles)-1 {
 			logger("[%s] [VALIDATE] Progress: %d/%d files validated\n", timestamp(), i+1, len(copiedFiles))
 		}

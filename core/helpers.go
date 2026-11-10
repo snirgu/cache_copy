@@ -147,4 +147,3 @@ func CopyAndHash(dst io.Writer, src io.Reader, buf []byte) (int64, uint64, error
 		}
 	}
 }
-
