@@ -140,3 +140,34 @@ func PrintCPUMonitor() {
 		time.Sleep(1 * time.Second)
 	}
 }
+
+// GetRetryCount returns the appropriate retry count based on whether the paths are CIFS/SMB
+func GetRetryCount(srcPath, dstPath string) int {
+	if IsCIFSPath(srcPath) || IsCIFSPath(dstPath) {
+		return 5 // More retries for CIFS/SMB paths
+	}
+	return 3 // Standard retry count for local filesystems
+}
+
+// IsCIFSPath detects if a path is likely a CIFS/SMB network path
+func IsCIFSPath(path string) bool {
+	if runtime.GOOS == "windows" {
+		// Windows: UNC paths (\\server\share) or network drives (F: and above)
+		if strings.HasPrefix(path, `\\`) {
+			return true
+		}
+		if len(path) >= 2 && path[1] == ':' {
+			drive := strings.ToUpper(string(path[0]))
+			// Consider drives F: and above as potentially network drives
+			if drive >= "F" {
+				return true
+			}
+		}
+	} else {
+		// Linux/Unix: common CIFS mount points
+		if strings.HasPrefix(path, "/mnt/") || strings.HasPrefix(path, "/media/") {
+			return true
+		}
+	}
+	return false
+}
